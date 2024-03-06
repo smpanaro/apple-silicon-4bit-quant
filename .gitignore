@@ -1,0 +1,4 @@
+env
+*.safetensors
+gpt2_4bit
+__pycache__
