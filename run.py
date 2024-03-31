@@ -58,10 +58,6 @@ class WrappedLitModel(nn.Module):
         logits = self.model(input_ids)#[0]
         loss = None
         if labels is not None:
-            # From lit-gpt
-            # loss = torch.nn.functional.cross_entropy(
-            #         logits[:-1], input_ids[0, 1:].to(dtype=torch.long), reduction="sum"
-            #     )
             # From HF gpt2
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous().to(dtype=torch.long)
@@ -274,9 +270,9 @@ def main(
     model_name: str = "gpt2",
     nbits: int=4,
     device: str="mps",
-    weighting: bool = False,
-    scaling: bool = False,
-    centering: bool = False,
+    weighting: bool = True,
+    scaling: bool = True,
+    centering: bool = True,
     quantize: bool = True,
     save: bool = False,
 ):
@@ -363,7 +359,6 @@ def main(
         quantizer = Quantizer(model, "mps")
         quantizer.center_activations(activation_stats) # Apply shifts.
 
-
     if quantize:
         # Quantization is CPU-heavy, so we move the model back to CPU.
         model = model.to("cpu")
@@ -398,69 +393,29 @@ def main(
     stride = 512
     seq_len = encodings.input_ids.size(1)
     nlls = []
-    parallel_perplexity = False # BUGGY on MPS at batch size > 1. Also, doesn't seem memory bound for ~160M models.
 
-    if not parallel_perplexity:
-    # START: original computation
-        prev_end_loc = 0
-        for begin_loc in (pbar := tqdm(range(0, seq_len, stride))):
-            pbar.set_description("Calculating perplexity")
-            end_loc = min(begin_loc + max_length, seq_len)
-            trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
-            input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
-            target_ids = input_ids.clone()
-            target_ids[:, :-trg_len] = -100
+    prev_end_loc = 0
+    for begin_loc in (pbar := tqdm(range(0, seq_len, stride))):
+        pbar.set_description("Calculating perplexity")
+        end_loc = min(begin_loc + max_length, seq_len)
+        trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
+        input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
+        target_ids = input_ids.clone()
+        target_ids[:, :-trg_len] = -100
 
-            with torch.inference_mode():
-                outputs = model(input_ids, labels=target_ids)
+        with torch.inference_mode():
+            outputs = model(input_ids, labels=target_ids)
 
-                # loss is calculated using CrossEntropyLoss which averages over valid labels
-                # N.B. the model only calculates loss over trg_len - 1 labels, because it internally shifts the labels
-                # to the left by 1.
-                neg_log_likelihood = outputs.loss
+            # loss is calculated using CrossEntropyLoss which averages over valid labels
+            # N.B. the model only calculates loss over trg_len - 1 labels, because it internally shifts the labels
+            # to the left by 1.
+            neg_log_likelihood = outputs.loss
 
-            nlls.append(neg_log_likelihood)
+        nlls.append(neg_log_likelihood)
 
-            prev_end_loc = end_loc
-            if end_loc == seq_len:
-                break
-    # END: original computation
-    else:
-    # START: parallel computation
-        batches = []
-        batch_size = 8 # 8 overflows on mps @ 160M
-        prev_end_loc = 0
-        for begin_loc in (pbar := tqdm(range(0, seq_len, stride))):
-            pbar.set_description(f"Preparing batches of {batch_size} for perplexity")
-            end_loc = min(begin_loc + max_length, seq_len)
-            trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
-            input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
-            target_ids = input_ids.clone()
-            target_ids[:, :-trg_len] = -100
-
-            is_last_loop = trg_len != stride
-            if len(batches) == 0 or len(batches[-1]) == batch_size or is_last_loop:
-                batches.append([])
-            batches[-1].append((input_ids, target_ids))
-
-            prev_end_loc = end_loc
-            if end_loc == seq_len:
-                break
-
-        for batch in (pbar := tqdm(batches)):
-            pbar.set_description("Calculating perplexity")
-            batch_inputs = torch.cat([x[0] for x in batch])
-
-            assert batch_inputs.shape[0] <= batch_size
-            batch_targets = [x[1] for x in batch]
-
-            with torch.no_grad():
-                # HuggingFace models don't support computing unbatched loss.
-                batch_outputs = model(batch_inputs).logits
-
-                for (bo, bt) in zip(batch_outputs.split(1, dim=0), batch_targets):
-                    nlls.append(compute_loss(bo, bt))
-    # END: parallel computation
+        prev_end_loc = end_loc
+        if end_loc == seq_len:
+            break
 
     assert not torch.isnan(torch.stack(nlls)).any()
     assert not torch.isinf(torch.stack(nlls)).any()

@@ -14,7 +14,7 @@ Supporting code for [the blog post](https://stephenpanaro.com/blog/llm-quantizat
 ## Results
 
 ```
-❯ python run.py --model_name gpt2 --weighting=True --scaling=True --centering=True
+❯ python run.py
 Running with model gpt2 on mps
 Quantizing to 4 bits with weighting=True, scaling=True, centering=True, quantize=True
 Centering linear layer input activations: : 72it [00:00, 100.14it/s]

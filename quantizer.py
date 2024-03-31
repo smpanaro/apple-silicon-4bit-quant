@@ -84,6 +84,8 @@ class Quantizer:
                     #         .replace("mlp.proj", "mlp.down_proj")
                     # print(sensitivities.keys())
                     # print(key_name  )
+
+                    # Erroring here? You probably need to manipulate your key names, similar to above.
                     chunk_sensitivities[key_name] = sensitivities.get_tensor(f"{key_name}.weight")
 
             if hasattr(self.model, "convert_sensitivities"):
@@ -104,23 +106,6 @@ class Quantizer:
                 else:
                     module.quantize(nbits, module_sensitivity)
 
-            # We're CPU bound, so use 1 thread per core.
-            # with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-            #     func = ClusterFriendlyLinear.quantize_func()
-            #     def wrapped_func(i):
-            #         def inner(args):
-            #             return (i, func(args))
-            #         return inner
-            #     futures = {executor.submit(wrapped_func(i), task) for i, task in enumerate(tasks)}
-
-            #     for future in tqdm(as_completed(futures), total=len(futures), desc=f"Quantizing to {nbits} bits", position=1):
-            #         (i, result) = future.result()
-            #         modules[i].apply_quantize(result)
-
-                # for i,task in enumerate(tasks):
-                #     result = ClusterFriendlyLinear.quantize_func()(task)
-                #     modules[i].apply_quantize(result)
-
             max_inflight_elements = 4096*4096*9 # ~45GB for pythia-6.9b -- tune per model (seems memory use is not linear with # paramss)
             with BoundedExecutor(max_inflight_elements, max_workers=os.cpu_count()) as executor:
                 func = ClusterFriendlyLinear.quantize_func()
@@ -139,95 +124,6 @@ class Quantizer:
             gc.collect()
             torch.mps.empty_cache()
 
-
-        # if parallel:
-        #     # for (i, result) in ParallelApplicator.apply(ClusterFriendlyLinear.quantize_func(), tasks, f"Quantizing to {nbits} bits"):
-        #     #     modules[i].apply_quantize(result)
-
-        #     from concurrent.futures import ThreadPoolExecutor, as_completed
-        #     # We're CPU bound, so use 1 thread per core.
-        #     # FIXME: Import os.cpu_count()
-        #     with ThreadPoolExecutor(max_workers=10) as executor:
-        #         func = ClusterFriendlyLinear.quantize_func()
-        #         def wrapped_func(i):
-        #             def inner(args):
-        #                 return (i, func(args))
-        #             return inner
-        #         futures = {executor.submit(wrapped_func(i), task) for i, task in enumerate(tasks)}
-
-        #         for future in (pbar := tqdm(as_completed(futures), total=len(futures))):
-        #             if HAS_TQDM:
-        #                 pbar.set_description(f"Quantizing to {nbits} bits")
-        #             (i, result) = future.result()
-        #             modules[i].apply_quantize(result)
-
-
-    @torch.no_grad()
-    @profile
-    def quantize_sequential(self, nbits: int, sensitivities: dict[str, torch.Tensor]={}, parallel=True):
-        """
-        Quantize the model in place. If sensitivites are provided, they are used
-        to improve quantization accuracies.
-        """
-
-        if isinstance(sensitivities, str):
-            from safetensors import safe_open
-            d = {}
-            try:
-                with safe_open(sensitivities, "pt", self.device) as f:
-                    for k in f.keys():
-                        d[k] = f.get_tensor(k)
-            except:
-                # If the dtype is not supported on the device, convert it post-load.
-                # Use a high precision to avoid nans (e.g. going from bfloat -> half).
-                with safe_open(sensitivities, "pt", "cpu") as f:
-                    for k in f.keys():
-                        d[k] = f.get_tensor(k).float().to(self.device)
-            assert len(d) > 0, f"empty sensitivities file at path {sensitivities}"
-            sensitivities = d
-        elif sensitivities is None:
-            sensitivities = {}
-
-        if hasattr(self.model, "convert_sensitivities"):
-            sensitivities = self.model.convert_sensitivities(sensitivities)
-
-
-        modules = []
-        tasks = []
-        for name, module in tqdm(self._named_custom_linears(), desc="Preparing for parallel quantization"):
-            if isinstance(module, ClusterFriendlyLinear):
-                module_sensitivity = sensitivities.get(f"{name}.weight", None)
-                if len(sensitivities) > 0:
-                    assert module_sensitivity is not None, f"no sensitivity found for {name}"
-                    assert module_sensitivity.shape == module.weight.shape, f"mismatched sensitivity shape for {name}"
-
-                if parallel:
-                    modules.append(module)
-                    tasks.append(module.quantize_args(nbits, module_sensitivity))
-                else:
-                    module.quantize(nbits, module_sensitivity)
-
-
-        if parallel:
-            # for (i, result) in ParallelApplicator.apply(ClusterFriendlyLinear.quantize_func(), tasks, f"Quantizing to {nbits} bits"):
-            #     modules[i].apply_quantize(result)
-
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            # We're CPU bound, so use 1 thread per core.
-            # FIXME: Import os.cpu_count()
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                func = ClusterFriendlyLinear.quantize_func()
-                def wrapped_func(i):
-                    def inner(args):
-                        return (i, func(args))
-                    return inner
-                futures = {executor.submit(wrapped_func(i), task) for i, task in enumerate(tasks)}
-
-                for future in (pbar := tqdm(as_completed(futures), total=len(futures))):
-                    pbar.set_description(f"Quantizing to {nbits} bits")
-                    (i, result) = future.result()
-                    modules[i].apply_quantize(result)
-
     def assert_quantized(self, nbits: int):
         num_clusters = 2 ** nbits
         total = 0
@@ -244,23 +140,6 @@ class Quantizer:
         return [(name, module)
                 for (name, module) in self.model.named_modules()
                 if isinstance(module, ClusterFriendlyLinear)]
-
-
-class ParallelApplicator:
-    @staticmethod
-    def apply(func, tasks, name: str):
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor() as executor:
-            def wrapped_func(i):
-                def inner(args):
-                    return (i, func(args))
-                return inner
-            futures = {executor.submit(wrapped_func(i), task) for i, task in enumerate(tasks)}
-
-            for future in (pbar := tqdm(as_completed(futures), total=len(futures))):
-                pbar.set_description(name)
-                (i, result) = future.result()
-                yield (i, result)
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import BoundedSemaphore
