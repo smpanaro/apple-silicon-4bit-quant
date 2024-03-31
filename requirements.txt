@@ -5,3 +5,8 @@ transformers==4.38.2
 safetensors==0.4.2
 numpy==1.26.4
 kmeans1d @ git+https://github.com/smpanaro/kmeans1d@831c169c3729aba18ca9ff4e57c4a7d26bcc8271 # Support for cluster weights.
+line_profiler
+filprofiler
+jsonargparse
+sentencepiece
+litgpt @ git+https://github.com/smpanaro/litgpt@7240cb5d7ee7e50c7bb7594596d0d7976f3115a0 # Support for split Q,K,V projections.

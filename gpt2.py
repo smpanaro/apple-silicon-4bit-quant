@@ -177,8 +177,16 @@ class GPT2LMHeadModel(modeling_gpt2.GPT2LMHeadModel):
                 total += 1
         print(f"Validated that all {total} linear layers have <= {num_clusters} unique values.")
 
+    def convert_sensitivities(self, sensitivities, just_attn=False):
+        """
+        If HF sensitivities are provided, convert them so they match this model.
+        """
+        if len(sensitivities) > 0:
+            pre_load_hook(sensitivities, None, None, None, None, None, None, just_attn=just_attn)
+        return sensitivities
+
 def pre_load_hook(state_dict, prefix, local_metadata, strict,
-                         missing_keys, unexpected_keys, error_msgs):
+                         missing_keys, unexpected_keys, error_msgs, just_attn=False):
     """
     Convert the conv1d weights to linear.
     """
@@ -195,6 +203,15 @@ def pre_load_hook(state_dict, prefix, local_metadata, strict,
             state_dict[name.replace("c_attn", "c_attn.k_proj")] = k
             state_dict[name.replace("c_attn", "c_attn.v_proj")] = v
             del state_dict[name]
+            # print('split', name)
+            # if len(q.shape) > 1:
+            #     print(f"{name}.q", q[:3, :3].flatten())
+            #     print(f"{name}.k", k[:3, :3].flatten())
+            #     print(f"{name}.v", v[:3, :3].flatten())
+        # elif just_attn:
+        #     print("skipping")
+        #     continue
 
-        elif name.endswith('weight') and any([x in name for x in ['c_attn', 'c_fc', 'c_proj']]):
+        elif not name.endswith('bias') and any([x in name for x in ['c_attn', 'c_fc', 'c_proj']]):
             state_dict[name] = state_dict[name].t()
+            # print("transposed", name)
